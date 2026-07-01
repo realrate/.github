@@ -1,31 +1,18 @@
 name: Dependabot Auto-Merge
 
-# Reusable workflow: call it from a repo with a thin caller that triggers on
-# pull_request_target and passes secrets, e.g.:
-#
-#   on:
-#     pull_request_target:
-#       types: [opened, synchronize]
-#       branches: [main]        # your default branch
-#   permissions:
-#     contents: write
-#     pull-requests: write
-#     issues: write
-#   jobs:
-#     auto-merge:
-#       # Guard on the PR *author* (not github.actor, which is the triggering
-#       # user and can be a maintainer on a rebase/synchronize). Keeps secrets
-#       # away from non-Dependabot (incl. fork) PRs while still running for every
-#       # Dependabot-authored PR regardless of who triggered the event.
-#       if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
-#       uses: realrate/.github/.github/workflows/dependabot-automerge.yaml@main
-#       secrets: inherit
+# Org-wide Dependabot auto-merge. This workflow is referenced by the org
+# `dependabot-automerge` ruleset ("Require workflows to pass before merging"),
+# which INJECTS and runs it on Dependabot PRs across every targeted repo — so
+# individual repos do NOT need their own copy or a caller. GitHub requires the
+# referenced workflow to be directly PR-triggerable (pull_request_target /
+# pull_request / merge_queue); it must NOT be a reusable (workflow_call) workflow.
 #
 # For patch/minor bumps it approves the PR and enables auto-merge (rebase); for
 # major bumps it comments and labels `needs-manual-review` for a human.
 
 on:
-  workflow_call:
+  pull_request_target:
+    types: [opened, synchronize]
 
 permissions:
   contents: write
