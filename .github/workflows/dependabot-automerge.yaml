@@ -13,7 +13,11 @@ name: Dependabot Auto-Merge
 #     issues: write
 #   jobs:
 #     auto-merge:
-#       if: ${{ github.actor == 'dependabot[bot]' }}   # guard: never pass secrets to non-Dependabot PRs
+#       # Guard on the PR *author* (not github.actor, which is the triggering
+#       # user and can be a maintainer on a rebase/synchronize). Keeps secrets
+#       # away from non-Dependabot (incl. fork) PRs while still running for every
+#       # Dependabot-authored PR regardless of who triggered the event.
+#       if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
 #       uses: realrate/.github/.github/workflows/dependabot-automerge.yaml@main
 #       secrets: inherit
 #
@@ -31,7 +35,9 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    # Guard on the PR author rather than github.actor (the triggering user,
+    # which can be a maintainer on a rebase/synchronize of the Dependabot branch).
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
 
     steps:
       - name: Fetch Dependabot metadata
