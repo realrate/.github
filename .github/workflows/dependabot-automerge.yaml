@@ -6,12 +6,14 @@ name: Dependabot Auto-Merge
 #   on:
 #     pull_request_target:
 #       types: [opened, synchronize]
+#       branches: [main]        # your default branch
 #   permissions:
 #     contents: write
 #     pull-requests: write
 #     issues: write
 #   jobs:
 #     auto-merge:
+#       if: ${{ github.actor == 'dependabot[bot]' }}   # guard: never pass secrets to non-Dependabot PRs
 #       uses: realrate/.github/.github/workflows/dependabot-automerge.yaml@main
 #       secrets: inherit
 #
