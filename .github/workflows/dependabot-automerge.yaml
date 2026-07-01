@@ -1,8 +1,25 @@
 name: Dependabot Auto-Merge
 
+# Reusable workflow: call it from a repo with a thin caller that triggers on
+# pull_request_target and passes secrets, e.g.:
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize]
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#     issues: write
+#   jobs:
+#     auto-merge:
+#       uses: realrate/.github/.github/workflows/dependabot-automerge.yaml@main
+#       secrets: inherit
+#
+# For patch/minor bumps it approves the PR and enables auto-merge (rebase); for
+# major bumps it comments and labels `needs-manual-review` for a human.
+
 on:
-  pull_request_target:
-    types: [opened, synchronize]
+  workflow_call:
 
 permissions:
   contents: write
