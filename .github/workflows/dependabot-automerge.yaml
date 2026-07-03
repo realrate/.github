@@ -61,7 +61,13 @@ jobs:
 
       - name: Add label to major bump PR
         if: steps.metadata.outputs.update-type == 'version-update:semver-major'
-        run: gh pr edit "$PR_URL" --add-label "needs-manual-review"
+        # Create the label if the repo doesn't have it, and never fail the job on
+        # labelling: this workflow is a required check, so a labelling error must
+        # NOT block a human from merging a major bump after manual review.
+        run: |
+          gh label create needs-manual-review --color FBCA04 \
+            --description "Dependabot major bump — needs manual review before merge" 2>/dev/null || true
+          gh pr edit "$PR_URL" --add-label "needs-manual-review" || true
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
