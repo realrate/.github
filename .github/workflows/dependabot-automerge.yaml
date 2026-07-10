@@ -7,8 +7,12 @@ name: Dependabot Auto-Merge
 # referenced workflow to be directly PR-triggerable (pull_request_target /
 # pull_request / merge_queue); it must NOT be a reusable (workflow_call) workflow.
 #
-# For patch/minor bumps it approves the PR and enables auto-merge (rebase); for
-# major bumps it comments and labels `needs-manual-review` for a human.
+# For patch/minor bumps it approves the PR and enables auto-merge (rebase). For
+# major bumps it comments and labels `needs-manual-review` for a human -- EXCEPT
+# for repos on AIGATE_ALLOWLIST, where major `github-actions` bumps get an AI
+# risk verdict (OpenAI) and are auto-merged if judged low-risk/non-breaking.
+# GitHub's required status checks still gate the actual merge, so a bump that
+# breaks CI never lands regardless of the AI verdict. See RealRate-Private#2229.
 
 on:
   pull_request_target:
@@ -22,6 +26,13 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
+    env:
+      # AI-gated auto-merge of MAJOR github-actions bumps (RealRate-Private#2229).
+      # Repos listed here opt in; all others keep comment + needs-manual-review.
+      # AIGATE_DRY_RUN=true posts the AI verdict as a comment but does NOT merge
+      # (rollout phase 1: observe verdicts before enforcing).
+      AIGATE_ALLOWLIST: '["realrate/RealRate-Private"]'
+      AIGATE_DRY_RUN: "true"
     # Guard on the PR author rather than github.actor (the triggering user,
     # which can be a maintainer on a rebase/synchronize of the Dependabot branch).
     if: github.event.pull_request.user.login == 'dependabot[bot]'
@@ -51,6 +62,9 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The generic major-bump comment/label below handle every major bump EXCEPT
+      # the AI-gated case (allowlisted repo + github-actions ecosystem), which is
+      # handled by the AI block further down so we don't double-comment/label.
       - name: Comment on major bump PR
         # Only comment when the PR is first opened, not on every synchronize,
         # so re-pushes/rebases of the Dependabot branch don't post duplicate
@@ -58,7 +72,8 @@ jobs:
         # left running on synchronize as a retry safety net.)
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          github.event.action == 'opened'
+          github.event.action == 'opened' &&
+          !(steps.metadata.outputs.package-ecosystem == 'github_actions' && contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository))
         run: |
           gh pr comment "$PR_URL" --body "⚠️ **Major version bump detected** — this PR requires manual review before merging. Please check the changelog for breaking changes."
         env:
@@ -66,7 +81,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Add label to major bump PR
-        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          !(steps.metadata.outputs.package-ecosystem == 'github_actions' && contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository))
         # Create the label if the repo doesn't have it, and never fail the job on
         # labelling: this workflow is a required check, so a labelling error must
         # NOT block a human from merging a major bump after manual review.
@@ -77,3 +94,91 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------------------------
+      # AI risk gate for MAJOR github-actions bumps (allowlisted repos only).
+      # Runs once, on `opened` (the dependency/version is fixed for the PR's life,
+      # so re-evaluating on every synchronize would only add noise). The verdict
+      # step is read-only and NEVER merges; a separate deterministic step acts on
+      # the verdict. We do NOT check out the PR head code -- the untrusted changelog
+      # is only classified. Requires an org-level OPENAI_API_KEY secret; on any
+      # failure the script emits verdict=human, so we never auto-merge on an error.
+      # ---------------------------------------------------------------------------
+      - name: Check out AI review tooling
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+          github.event.action == 'opened' &&
+          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: realrate/.github
+          path: _aigate
+
+      - name: AI risk verdict for major github-actions bump
+        id: aiverdict
+        continue-on-error: true # a failed verdict must fall through to manual review, not fail the required check
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+          github.event.action == 'opened' &&
+          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-5-mini
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check -r _aigate/.github/review-tooling/requirements.txt
+          gh pr view "$PR_URL" --json title --jq .title > pr_title.txt
+          gh pr view "$PR_URL" --json body  --jq '.body // ""' > pr_body.txt
+          python3 _aigate/.github/review-tooling/review_dependabot_major.py \
+            --title-file pr_title.txt --body-file pr_body.txt \
+            --dep-names "$DEP_NAMES" --out verdict.json
+          {
+            echo "verdict=$(jq -r .verdict verdict.json)"
+            echo "reason=$(jq -r .reason verdict.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Auto-merge major github-actions bump (verdict=auto)
+        if: |
+          steps.aiverdict.outcome == 'success' &&
+          steps.aiverdict.outputs.verdict == 'auto' &&
+          env.AIGATE_DRY_RUN != 'true'
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REASON: ${{ steps.aiverdict.outputs.reason }}
+        run: |
+          gh pr comment "$PR_URL" --body "🤖 **AI risk gate: auto-merge.** ${REASON} Required CI checks must still pass before the merge completes."
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --rebase "$PR_URL"
+
+      - name: Route major github-actions bump to human (not auto-merged)
+        # Runs for every eligible PR that is NOT being auto-merged: verdict=human,
+        # dry-run, or a failed/empty verdict. Adds the same needs-manual-review label.
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+          github.event.action == 'opened' &&
+          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository) &&
+          !(steps.aiverdict.outcome == 'success' && steps.aiverdict.outputs.verdict == 'auto' && env.AIGATE_DRY_RUN != 'true')
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERDICT: ${{ steps.aiverdict.outputs.verdict }}
+          REASON: ${{ steps.aiverdict.outputs.reason }}
+          DRY_RUN: ${{ env.AIGATE_DRY_RUN }}
+        run: |
+          if [ -z "$VERDICT" ]; then
+            body="🤖 **AI risk gate: unavailable** — routed to manual review."
+          elif [ "$DRY_RUN" = "true" ] && [ "$VERDICT" = "auto" ]; then
+            body="🤖 **AI risk gate: auto** _(dry-run — auto-merge disabled; observing)._ ${REASON} Left for manual review."
+          else
+            body="🤖 **AI risk gate: ${VERDICT}.** ${REASON} Left for manual review."
+          fi
+          gh pr comment "$PR_URL" --body "$body"
+          gh label create needs-manual-review --color FBCA04 \
+            --description "Dependabot major bump — needs manual review before merge" 2>/dev/null || true
+          gh pr edit "$PR_URL" --add-label "needs-manual-review" || true
