@@ -52,7 +52,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Comment on major bump PR
-        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
+        # Only comment when the PR is first opened, not on every synchronize,
+        # so re-pushes/rebases of the Dependabot branch don't post duplicate
+        # "manual review" comments. (The label step below is idempotent and is
+        # left running on synchronize as a retry safety net.)
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          github.event.action == 'opened'
         run: |
           gh pr comment "$PR_URL" --body "⚠️ **Major version bump detected** — this PR requires manual review before merging. Please check the changelog for breaking changes."
         env:
