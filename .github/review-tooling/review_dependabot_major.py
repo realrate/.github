@@ -6,8 +6,13 @@ github-actions version bump is safe to auto-merge. The AI only *classifies* the
 changelog; it never merges. GitHub's required status checks still gate the real
 merge, so a bump that breaks CI never lands regardless of this verdict.
 
+Inference runs on **GitHub Models** (https://models.github.ai/inference) using the
+workflow's built-in GITHUB_TOKEN + `models: read` permission -- no external API
+key. The OpenAI SDK is only the client library; it targets the GitHub Models
+endpoint, not OpenAI. Model defaults to `openai/gpt-5` (override via MODEL_ID).
+
 Contract: ALWAYS writes a valid verdict JSON and exits 0. On any error
-(missing key, API failure, unparseable response) it emits verdict="human" so the
+(missing token, API failure, unparseable response) it emits verdict="human" so the
 workflow falls back to manual review -- we never auto-merge on an errored verdict.
 
 Output schema (verdict.json):
@@ -16,9 +21,14 @@ Output schema (verdict.json):
 import argparse
 import json
 import os
+import re
 import sys
 
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+MODEL = os.getenv("MODEL_ID", "openai/gpt-5")
+# GitHub Models inference endpoint (OpenAI-compatible). Override for tests.
+BASE_URL = os.getenv("MODEL_ENDPOINT", "https://models.github.ai/inference")
+# The built-in Actions token authenticates GitHub Models (needs `models: read`).
+TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("MODEL_TOKEN")
 
 SYSTEM_PROMPT = (
     "You classify whether a MAJOR version bump of a pinned GitHub Action is safe "
@@ -65,10 +75,36 @@ def _fallback(reason):
     return {"verdict": "human", "risk": "unknown", "reason": reason}
 
 
+def _extract_json(text):
+    """Parse a JSON object from a model response, tolerating ```json fences/prose."""
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except Exception:  # noqa: BLE001
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        return json.loads(m.group(0)) if m else None
+
+
+def _call_model(client, user, structured):
+    """One GitHub Models call. `structured` toggles response_format json_schema."""
+    kwargs = dict(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ],
+        max_completion_tokens=3000,
+    )
+    if structured:
+        kwargs["response_format"] = {"type": "json_schema", "json_schema": SCHEMA}
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message.content
+
+
 def get_verdict(dep_names, title, body):
-    """Call OpenAI and return a validated verdict dict. Never raises."""
-    if not os.getenv("OPENAI_API_KEY"):
-        return _fallback("OPENAI_API_KEY not set; defaulting to manual review.")
+    """Ask GitHub Models for a validated verdict dict. Never raises."""
+    if not TOKEN:
+        return _fallback("GITHUB_TOKEN not set (need `models: read`); manual review.")
     try:
         from openai import OpenAI
     except Exception as exc:  # noqa: BLE001 - import guard
@@ -79,23 +115,23 @@ def get_verdict(dep_names, title, body):
     user = (
         f"Dependency: {dep_names or '(unknown)'}\n"
         f"PR title (version delta): {title}\n\n"
-        f"Changelog / release notes (untrusted):\n{body}"
+        f"Changelog / release notes (untrusted):\n{body}\n\n"
+        "Respond with ONLY a JSON object: "
+        '{"verdict":"auto|human","risk":"low|medium|high|unknown","reason":"..."}'
     )
-    try:
-        client = OpenAI()
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user},
-            ],
-            response_format={"type": "json_schema", "json_schema": SCHEMA},
-            max_completion_tokens=3000,
-        )
-        content = resp.choices[0].message.content
-        data = json.loads(content)
-    except Exception as exc:  # noqa: BLE001 - any API/parse failure => human
-        return _fallback(f"AI verdict unavailable ({type(exc).__name__}); manual review.")
+    client = OpenAI(base_url=BASE_URL, api_key=TOKEN)
+    data = None
+    # Prefer strict structured output; fall back to plain + JSON extraction so the
+    # gate is model-agnostic (some GitHub Models entries reject response_format).
+    for structured in (True, False):
+        try:
+            data = _extract_json(_call_model(client, user, structured))
+            if data:
+                break
+        except Exception as exc:  # noqa: BLE001 - any API/parse failure
+            last = type(exc).__name__
+    if not data:
+        return _fallback(f"AI verdict unavailable ({locals().get('last', 'no JSON')}); manual review.")
 
     if data.get("verdict") not in ("auto", "human"):
         return _fallback("AI returned an unrecognized verdict; manual review.")
