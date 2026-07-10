@@ -129,7 +129,9 @@ jobs:
           # Inference runs on GitHub Models via the built-in token (`models: read`);
           # no external API key. GITHUB_TOKEN also authenticates the `gh` calls below.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MODEL_ID: openai/gpt-5
+          # gpt-4.1 is the strongest model actually available for GitHub Models
+          # inference (gpt-5* are cataloged but return `unavailable_model`).
+          MODEL_ID: openai/gpt-4.1
           PR_URL: ${{ github.event.pull_request.html_url }}
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
         run: |
