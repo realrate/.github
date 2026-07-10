@@ -30,10 +30,10 @@ jobs:
     env:
       # AI-gated auto-merge of MAJOR github-actions bumps (RealRate-Private#2229).
       # Repos listed here opt in; all others keep comment + needs-manual-review.
-      # AIGATE_DRY_RUN=true posts the AI verdict as a comment but does NOT merge
-      # (rollout phase 1: observe verdicts before enforcing).
+      # AIGATE_DRY_RUN=true posts the AI verdict as a comment but does NOT merge;
+      # =false enforces (verdict=auto -> approve + auto-merge, still gated by CI).
       AIGATE_ALLOWLIST: '["realrate/RealRate-Private"]'
-      AIGATE_DRY_RUN: "true"
+      AIGATE_DRY_RUN: "false"
     # Guard on the PR author rather than github.actor (the triggering user,
     # which can be a maintainer on a rebase/synchronize of the Dependabot branch).
     if: github.event.pull_request.user.login == 'dependabot[bot]'
