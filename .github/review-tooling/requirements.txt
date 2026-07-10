@@ -1,0 +1,2 @@
+# Pinned deps for review_dependabot_major.py (the AI risk gate on major bumps).
+openai==2.45.0
