@@ -10,7 +10,7 @@ name: Dependabot Auto-Merge
 # For patch/minor bumps it approves the PR and enables auto-merge (rebase). For
 # major bumps it comments and labels `needs-manual-review` for a human -- EXCEPT
 # for repos on AIGATE_ALLOWLIST, where major `github-actions` bumps get an AI
-# risk verdict (OpenAI) and are auto-merged if judged low-risk/non-breaking.
+# risk verdict (GitHub Models) and are auto-merged if judged low-risk/non-breaking.
 # GitHub's required status checks still gate the actual merge, so a bump that
 # breaks CI never lands regardless of the AI verdict. See RealRate-Private#2229.
 
@@ -22,6 +22,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  models: read # GitHub Models inference for the major-bump AI risk gate
 
 jobs:
   auto-merge:
@@ -101,8 +102,9 @@ jobs:
       # so re-evaluating on every synchronize would only add noise). The verdict
       # step is read-only and NEVER merges; a separate deterministic step acts on
       # the verdict. We do NOT check out the PR head code -- the untrusted changelog
-      # is only classified. Requires an org-level OPENAI_API_KEY secret; on any
-      # failure the script emits verdict=human, so we never auto-merge on an error.
+      # is only classified. Inference uses GitHub Models via the built-in token (no
+      # external secret); on any failure the script emits verdict=human, so we never
+      # auto-merge on an errored verdict.
       # ---------------------------------------------------------------------------
       - name: Check out AI review tooling
         if: |
@@ -124,9 +126,10 @@ jobs:
           github.event.action == 'opened' &&
           contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5-mini
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Inference runs on GitHub Models via the built-in token (`models: read`);
+          # no external API key. GITHUB_TOKEN also authenticates the `gh` calls below.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODEL_ID: openai/gpt-5
           PR_URL: ${{ github.event.pull_request.html_url }}
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
         run: |
