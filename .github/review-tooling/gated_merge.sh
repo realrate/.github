@@ -25,8 +25,9 @@
 #   GITHUB_RUN_ID          (auto on runners) this run's id; excludes our own check
 #   CI_GATE_ENABLED        default "true"; "false" = kill switch, native --auto merge
 #   MERGE_METHOD           default "rebase"
-#   GATE_APPEAR_SECONDS    default 180; grace for checks to register before we treat
-#                          the repo as having no gating CI
+#   GATE_APPEAR_SECONDS    default 300; how long to wait for checks to register
+#                          before giving up and routing to a human (never merges
+#                          without a green signal, even if the repo has no CI)
 #   GATE_TIMEOUT_SECONDS   default 1800; overall budget to wait for checks to finish
 #   GATE_POLL_SECONDS      default 30; poll interval
 set -uo pipefail
@@ -35,7 +36,7 @@ set -uo pipefail
 
 CI_GATE_ENABLED="${CI_GATE_ENABLED:-true}"
 MERGE_METHOD="${MERGE_METHOD:-rebase}"
-APPEAR="${GATE_APPEAR_SECONDS:-180}"
+APPEAR="${GATE_APPEAR_SECONDS:-300}"
 TIMEOUT="${GATE_TIMEOUT_SECONDS:-1800}"
 POLL="${GATE_POLL_SECONDS:-30}"
 
@@ -57,8 +58,24 @@ route_to_human() {
 }
 
 do_merge() {
-  gh pr merge --"$MERGE_METHOD" "$PR_URL" \
-    || route_to_human "all checks passed but the merge was rejected (branch protection, conflict, or a required human review)."
+  # Try an immediate merge first. The base branch's ruleset can prohibit an
+  # immediate merge until its required workflow/checks settle ("the base branch
+  # policy prohibits the merge ... add the --auto flag"); in that case enable
+  # auto-merge so GitHub completes the merge once the policy is satisfied. Our
+  # own checks are already green here, so --auto only defers to the branch policy,
+  # it does not skip CI. Anything else -> route to a human.
+  local err
+  if err="$(gh pr merge --"$MERGE_METHOD" "$PR_URL" 2>&1)"; then
+    echo "Merged."
+    return 0
+  fi
+  if printf '%s' "$err" | grep -qiE "add the .--auto. flag|base branch policy prohibits"; then
+    if gh pr merge --auto --"$MERGE_METHOD" "$PR_URL"; then
+      echo "Immediate merge blocked by branch policy; enabled --auto (GitHub will complete it once requirements are met)."
+      return 0
+    fi
+  fi
+  route_to_human "the merge was rejected: $(printf '%s' "$err" | tail -1)"
 }
 
 # The PR's checks minus THIS workflow's own run, matched by run id inside the
@@ -75,14 +92,16 @@ other_checks() {
 
 start="$SECONDS"
 
-# 1) Wait for CI to register. A repo with no gating CI merges on the existing
-#    signal (patch/minor policy, or the AI verdict for majors) -- unchanged.
+# 1) Wait for CI to register. Checks can be slow to appear under runner-queue
+#    contention, so we wait up to APPEAR. We do NOT merge on "no checks" -- that
+#    would skip the gate exactly when checks are merely delayed (and an immediate
+#    merge before the base-branch policy's requirements exist gets rejected
+#    anyway). If nothing registers, route to a human rather than merge blind.
 while :; do
   checks="$(other_checks)"
   [ "$(echo "$checks" | jq 'length')" -gt 0 ] && break
   if [ $((SECONDS - start)) -ge "$APPEAR" ]; then
-    echo "No CI checks registered within ${APPEAR}s; merging on the existing signal."
-    do_merge
+    route_to_human "no CI checks registered within ${APPEAR}s (checks delayed, or the repo has none) -- not auto-merging without a green signal."
     exit 0
   fi
   sleep "$POLL"
