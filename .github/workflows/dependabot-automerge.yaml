@@ -7,16 +7,32 @@ name: Dependabot Auto-Merge
 # referenced workflow to be directly PR-triggerable (pull_request_target /
 # pull_request / merge_queue); it must NOT be a reusable (workflow_call) workflow.
 #
-# For patch/minor bumps it approves the PR and enables auto-merge (rebase). For
-# major bumps it comments and labels `needs-manual-review` for a human -- EXCEPT
-# for repos on AIGATE_ALLOWLIST, where major `github-actions` bumps get an AI
-# risk verdict (GitHub Models) and are auto-merged if judged low-risk/non-breaking.
-# GitHub's required status checks still gate the actual merge, so a bump that
-# breaks CI never lands regardless of the AI verdict. See RealRate-Private#2229.
+# Patch/minor bumps are approved and CI-gate-merged. EVERY major bump (any
+# ecosystem -- github-actions, uv/pip, docker -- in every repo) gets an AI risk
+# verdict (GitHub Models) and is auto-merged if judged low-risk/non-breaking,
+# else commented + labeled `needs-manual-review` for a human. The ecosystem is a
+# hint to the classifier, not a gate, so it adapts to whatever fetch-metadata
+# reports (this repo uses `uv` for Python, not `pip`).
+#
+# Every auto-merge (patch/minor AND AI-approved majors) goes through
+# review-tooling/gated_merge.sh, which waits for the PR's own CI checks to finish
+# and merges only if they all pass -- otherwise it routes to manual review. This
+# replaces `gh pr merge --auto` (which only waits for *required* status checks):
+# because this workflow is injected across repos whose checks are named
+# differently or absent, we cannot express "tests must pass" as a per-repo
+# required check, so the script reads the PR's actual check conclusions instead.
+# A failed test therefore blocks the merge even where no required checks exist.
+# See RealRate-Private#2229 (AI gate) and #2244 (CI gate).
 
 on:
   pull_request_target:
     types: [opened, synchronize]
+
+# One in-flight run per PR. A new event (e.g. a rebase/synchronize) cancels the
+# previous run so two runs never wait on CI and race to merge the same PR.
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -28,12 +44,18 @@ jobs:
   auto-merge:
     runs-on: ubuntu-latest
     env:
-      # AI-gated auto-merge of MAJOR github-actions bumps (RealRate-Private#2229).
-      # Repos listed here opt in; all others keep comment + needs-manual-review.
+      # AI-gated auto-merge of MAJOR bumps, in every repo the shared workflow is
+      # injected into (RealRate-Private#2229). Covers ALL ecosystems: libraries
+      # (uv), github-actions, and docker.
       # AIGATE_DRY_RUN=true posts the AI verdict as a comment but does NOT merge;
-      # =false enforces (verdict=auto -> approve + auto-merge, still gated by CI).
-      AIGATE_ALLOWLIST: '["realrate/RealRate-Private"]'
+      # =false enforces. ENFORCING: a major bump the AI judges low-risk AND whose
+      # CI passes is auto-merged; AI-flagged risk or a failed check routes to a
+      # human. patch/minor auto-merge + the CI gate are unaffected by this flag.
       AIGATE_DRY_RUN: "false"
+      # CI gate (RealRate-Private#2244): when "true", auto-merges wait for the
+      # PR's checks to pass before merging. Set "false" as a kill switch to fall
+      # back to GitHub-native `--auto` (waits only for *required* checks).
+      CI_GATE_ENABLED: "true"
     # Guard on the PR author rather than github.actor (the triggering user,
     # which can be a maintainer on a rebase/synchronize of the Dependabot branch).
     if: github.event.pull_request.user.login == 'dependabot[bot]'
@@ -45,6 +67,15 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
+      # Our own org tooling (gated_merge.sh + the AI review script). Pinned ref,
+      # NOT the PR head -- pull_request_target runs with write perms, so we never
+      # check out untrusted bump code. Used by every auto-merge path below.
+      - name: Check out merge tooling
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: realrate/.github
+          path: _tooling
+
       - name: Approve PR
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
@@ -54,50 +85,19 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge
+      - name: Auto-merge patch/minor bump (gated on CI)
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
           steps.metadata.outputs.update-type == 'version-update:semver-minor'
-        run: gh pr merge --auto --rebase "$PR_URL"
+        run: bash _tooling/.github/review-tooling/gated_merge.sh
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # The generic major-bump comment/label below handle every major bump EXCEPT
-      # the AI-gated case (allowlisted repo + github-actions ecosystem), which is
-      # handled by the AI block further down so we don't double-comment/label.
-      - name: Comment on major bump PR
-        # Only comment when the PR is first opened, not on every synchronize,
-        # so re-pushes/rebases of the Dependabot branch don't post duplicate
-        # "manual review" comments. (The label step below is idempotent and is
-        # left running on synchronize as a retry safety net.)
-        if: |
-          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          github.event.action == 'opened' &&
-          !(steps.metadata.outputs.package-ecosystem == 'github_actions' && contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository))
-        run: |
-          gh pr comment "$PR_URL" --body "⚠️ **Major version bump detected** — this PR requires manual review before merging. Please check the changelog for breaking changes."
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Add label to major bump PR
-        if: |
-          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          !(steps.metadata.outputs.package-ecosystem == 'github_actions' && contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository))
-        # Create the label if the repo doesn't have it, and never fail the job on
-        # labelling: this workflow is a required check, so a labelling error must
-        # NOT block a human from merging a major bump after manual review.
-        run: |
-          gh label create needs-manual-review --color FBCA04 \
-            --description "Dependabot major bump — needs manual review before merge" 2>/dev/null || true
-          gh pr edit "$PR_URL" --add-label "needs-manual-review" || true
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_GATE_ENABLED: ${{ env.CI_GATE_ENABLED }}
+          MERGE_METHOD: rebase
 
       # ---------------------------------------------------------------------------
-      # AI risk gate for MAJOR github-actions bumps (allowlisted repos only).
+      # AI risk gate for EVERY MAJOR bump (any ecosystem, every repo).
       # Runs once, on `opened` (the dependency/version is fixed for the PR's life,
       # so re-evaluating on every synchronize would only add noise). The verdict
       # step is read-only and NEVER merges; a separate deterministic step acts on
@@ -106,25 +106,18 @@ jobs:
       # external secret); on any failure the script emits verdict=human, so we never
       # auto-merge on an errored verdict.
       # ---------------------------------------------------------------------------
-      - name: Check out AI review tooling
+      - name: Set up uv (runs the AI verdict script)
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
-          github.event.action == 'opened' &&
-          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: realrate/.github
-          path: _aigate
+          github.event.action == 'opened'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
 
-      - name: AI risk verdict for major github-actions bump
+      - name: AI risk verdict for major bump
         id: aiverdict
         continue-on-error: true # a failed verdict must fall through to manual review, not fail the required check
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
-          github.event.action == 'opened' &&
-          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository)
+          github.event.action == 'opened'
         env:
           # Inference runs on GitHub Models via the built-in token (`models: read`);
           # no external API key. GITHUB_TOKEN also authenticates the `gh` calls below.
@@ -134,19 +127,21 @@ jobs:
           MODEL_ID: openai/gpt-4.1
           PR_URL: ${{ github.event.pull_request.html_url }}
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check -r _aigate/.github/review-tooling/requirements.txt
           gh pr view "$PR_URL" --json title --jq .title > pr_title.txt
           gh pr view "$PR_URL" --json body  --jq '.body // ""' > pr_body.txt
-          python3 _aigate/.github/review-tooling/review_dependabot_major.py \
+          # PEP 723 inline deps are provisioned by uv in an isolated env; --script
+          # forces script mode so the surrounding repo's project is ignored.
+          uv run --script _tooling/.github/review-tooling/review_dependabot_major.py \
             --title-file pr_title.txt --body-file pr_body.txt \
-            --dep-names "$DEP_NAMES" --out verdict.json
+            --dep-names "$DEP_NAMES" --ecosystem "$ECOSYSTEM" --out verdict.json
           {
             echo "verdict=$(jq -r .verdict verdict.json)"
             echo "reason=$(jq -r .reason verdict.json)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Auto-merge major github-actions bump (verdict=auto)
+      - name: Auto-merge major bump (verdict=auto, gated on CI)
         if: |
           steps.aiverdict.outcome == 'success' &&
           steps.aiverdict.outputs.verdict == 'auto' &&
@@ -155,19 +150,19 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REASON: ${{ steps.aiverdict.outputs.reason }}
+          CI_GATE_ENABLED: ${{ env.CI_GATE_ENABLED }}
+          MERGE_METHOD: rebase
         run: |
-          gh pr comment "$PR_URL" --body "🤖 **AI risk gate: auto-merge.** ${REASON} Required CI checks must still pass before the merge completes."
+          gh pr comment "$PR_URL" --body "🤖 **AI risk gate: auto-merge.** ${REASON} CI checks must still pass before the merge completes."
           gh pr review --approve "$PR_URL"
-          gh pr merge --auto --rebase "$PR_URL"
+          bash _tooling/.github/review-tooling/gated_merge.sh
 
-      - name: Route major github-actions bump to human (not auto-merged)
-        # Runs for every eligible PR that is NOT being auto-merged: verdict=human,
+      - name: Route major bump to human (not auto-merged)
+        # Runs for every major bump that is NOT being auto-merged: verdict=human,
         # dry-run, or a failed/empty verdict. Adds the same needs-manual-review label.
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
           github.event.action == 'opened' &&
-          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository) &&
           !(steps.aiverdict.outcome == 'success' && steps.aiverdict.outputs.verdict == 'auto' && env.AIGATE_DRY_RUN != 'true')
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
