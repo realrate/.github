@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["openai==2.45.0"]
+# ///
+# Dependencies are declared inline (PEP 723) and provisioned by `uv run --script`
+# on the runner -- no requirements.txt, no project venv. `openai` is only the
+# client library, pointed at the GitHub Models endpoint (see below); not the
+# OpenAI API.
 """Render a machine-readable risk verdict for a MAJOR Dependabot bump.
 
 Used by the shared Dependabot auto-merge workflow to decide whether a major

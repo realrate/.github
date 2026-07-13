@@ -1,6 +1,0 @@
-# Pinned deps for review_dependabot_major.py (the AI risk gate on major bumps).
-# NOTE: this is only the client LIBRARY. It is pointed at the GitHub Models
-# endpoint (https://models.github.ai/inference) and authenticated with the
-# workflow's built-in GITHUB_TOKEN. We do NOT use the OpenAI API, an OpenAI API
-# key, or OpenAI billing -- inference runs entirely on GitHub Models.
-openai==2.45.0

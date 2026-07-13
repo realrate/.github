@@ -106,6 +106,12 @@ jobs:
       # external secret); on any failure the script emits verdict=human, so we never
       # auto-merge on an errored verdict.
       # ---------------------------------------------------------------------------
+      - name: Set up uv (runs the AI verdict script)
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+          github.event.action == 'opened'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
       - name: AI risk verdict for major bump
         id: aiverdict
         continue-on-error: true # a failed verdict must fall through to manual review, not fail the required check
@@ -123,10 +129,11 @@ jobs:
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
           ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check -r _tooling/.github/review-tooling/requirements.txt
           gh pr view "$PR_URL" --json title --jq .title > pr_title.txt
           gh pr view "$PR_URL" --json body  --jq '.body // ""' > pr_body.txt
-          python3 _tooling/.github/review-tooling/review_dependabot_major.py \
+          # PEP 723 inline deps are provisioned by uv in an isolated env; --script
+          # forces script mode so the surrounding repo's project is ignored.
+          uv run --script _tooling/.github/review-tooling/review_dependabot_major.py \
             --title-file pr_title.txt --body-file pr_body.txt \
             --dep-names "$DEP_NAMES" --ecosystem "$ECOSYSTEM" --out verdict.json
           {
