@@ -45,14 +45,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # AI-gated auto-merge of MAJOR bumps, in every repo the shared workflow is
-      # injected into (RealRate-Private#2229).
+      # injected into (RealRate-Private#2229). Covers ALL ecosystems: libraries
+      # (uv), github-actions, and docker.
       # AIGATE_DRY_RUN=true posts the AI verdict as a comment but does NOT merge;
-      # =false enforces (verdict=auto -> approve + gated auto-merge).
-      # Shipping in OBSERVE mode (true): watch the AI verdicts on real major bumps
-      # -- especially uv/Python, where our tests have known blind spots -- then
-      # flip to "false" to enforce. patch/minor auto-merge + the CI gate are
-      # unaffected by this flag.
-      AIGATE_DRY_RUN: "true"
+      # =false enforces. ENFORCING: a major bump the AI judges low-risk AND whose
+      # CI passes is auto-merged; AI-flagged risk or a failed check routes to a
+      # human. patch/minor auto-merge + the CI gate are unaffected by this flag.
+      AIGATE_DRY_RUN: "false"
       # CI gate (RealRate-Private#2244): when "true", auto-merges wait for the
       # PR's checks to pass before merging. Set "false" as a kill switch to fall
       # back to GitHub-native `--auto` (waits only for *required* checks).
