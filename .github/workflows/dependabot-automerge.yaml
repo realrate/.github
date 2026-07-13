@@ -7,11 +7,10 @@ name: Dependabot Auto-Merge
 # referenced workflow to be directly PR-triggerable (pull_request_target /
 # pull_request / merge_queue); it must NOT be a reusable (workflow_call) workflow.
 #
-# For patch/minor bumps it approves the PR; for major bumps it comments and
-# labels `needs-manual-review` for a human -- EXCEPT major `github-actions`
-# bumps, which in EVERY repo get an AI risk verdict (GitHub Models) and are
-# eligible for auto-merge if judged low-risk/non-breaking. Major pip/docker bumps
-# stay human.
+# Patch/minor bumps are approved and CI-gate-merged. EVERY major bump (any
+# ecosystem -- github-actions, pip, docker -- in every repo) gets an AI risk
+# verdict (GitHub Models) and is auto-merged if judged low-risk/non-breaking,
+# else commented + labeled `needs-manual-review` for a human.
 #
 # Every auto-merge (patch/minor AND AI-approved majors) goes through
 # review-tooling/gated_merge.sh, which waits for the PR's own CI checks to finish
@@ -92,41 +91,8 @@ jobs:
           CI_GATE_ENABLED: ${{ env.CI_GATE_ENABLED }}
           MERGE_METHOD: rebase
 
-      # The generic major-bump comment/label below handle every NON-github-actions
-      # major bump. github-actions majors are handled by the AI block further down
-      # (in every repo), so we don't double-comment/label them here.
-      - name: Comment on major bump PR
-        # Only comment when the PR is first opened, not on every synchronize,
-        # so re-pushes/rebases of the Dependabot branch don't post duplicate
-        # "manual review" comments. (The label step below is idempotent and is
-        # left running on synchronize as a retry safety net.)
-        if: |
-          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          github.event.action == 'opened' &&
-          steps.metadata.outputs.package-ecosystem != 'github_actions'
-        run: |
-          gh pr comment "$PR_URL" --body "⚠️ **Major version bump detected** — this PR requires manual review before merging. Please check the changelog for breaking changes."
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Add label to major bump PR
-        if: |
-          steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          steps.metadata.outputs.package-ecosystem != 'github_actions'
-        # Create the label if the repo doesn't have it, and never fail the job on
-        # labelling: this workflow is a required check, so a labelling error must
-        # NOT block a human from merging a major bump after manual review.
-        run: |
-          gh label create needs-manual-review --color FBCA04 \
-            --description "Dependabot major bump — needs manual review before merge" 2>/dev/null || true
-          gh pr edit "$PR_URL" --add-label "needs-manual-review" || true
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       # ---------------------------------------------------------------------------
-      # AI risk gate for MAJOR github-actions bumps (every repo).
+      # AI risk gate for EVERY MAJOR bump (any ecosystem, every repo).
       # Runs once, on `opened` (the dependency/version is fixed for the PR's life,
       # so re-evaluating on every synchronize would only add noise). The verdict
       # step is read-only and NEVER merges; a separate deterministic step acts on
@@ -135,12 +101,11 @@ jobs:
       # external secret); on any failure the script emits verdict=human, so we never
       # auto-merge on an errored verdict.
       # ---------------------------------------------------------------------------
-      - name: AI risk verdict for major github-actions bump
+      - name: AI risk verdict for major bump
         id: aiverdict
         continue-on-error: true # a failed verdict must fall through to manual review, not fail the required check
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
           github.event.action == 'opened'
         env:
           # Inference runs on GitHub Models via the built-in token (`models: read`);
@@ -151,19 +116,20 @@ jobs:
           MODEL_ID: openai/gpt-4.1
           PR_URL: ${{ github.event.pull_request.html_url }}
           DEP_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
         run: |
           python3 -m pip install --quiet --disable-pip-version-check -r _tooling/.github/review-tooling/requirements.txt
           gh pr view "$PR_URL" --json title --jq .title > pr_title.txt
           gh pr view "$PR_URL" --json body  --jq '.body // ""' > pr_body.txt
           python3 _tooling/.github/review-tooling/review_dependabot_major.py \
             --title-file pr_title.txt --body-file pr_body.txt \
-            --dep-names "$DEP_NAMES" --out verdict.json
+            --dep-names "$DEP_NAMES" --ecosystem "$ECOSYSTEM" --out verdict.json
           {
             echo "verdict=$(jq -r .verdict verdict.json)"
             echo "reason=$(jq -r .reason verdict.json)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Auto-merge major github-actions bump (verdict=auto, gated on CI)
+      - name: Auto-merge major bump (verdict=auto, gated on CI)
         if: |
           steps.aiverdict.outcome == 'success' &&
           steps.aiverdict.outputs.verdict == 'auto' &&
@@ -179,12 +145,11 @@ jobs:
           gh pr review --approve "$PR_URL"
           bash _tooling/.github/review-tooling/gated_merge.sh
 
-      - name: Route major github-actions bump to human (not auto-merged)
-        # Runs for every eligible PR that is NOT being auto-merged: verdict=human,
+      - name: Route major bump to human (not auto-merged)
+        # Runs for every major bump that is NOT being auto-merged: verdict=human,
         # dry-run, or a failed/empty verdict. Adds the same needs-manual-review label.
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          steps.metadata.outputs.package-ecosystem == 'github_actions' &&
           github.event.action == 'opened' &&
           !(steps.aiverdict.outcome == 'success' && steps.aiverdict.outputs.verdict == 'auto' && env.AIGATE_DRY_RUN != 'true')
         env:
