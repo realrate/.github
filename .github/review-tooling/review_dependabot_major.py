@@ -2,8 +2,8 @@
 """Render a machine-readable risk verdict for a MAJOR Dependabot bump.
 
 Used by the shared Dependabot auto-merge workflow to decide whether a major
-version bump -- any ecosystem: pip, docker, or github-actions -- is safe to
-auto-merge. The AI only *classifies* the changelog; it never merges. The
+version bump -- any ecosystem: Python (uv / pip), docker, or github-actions -- is
+safe to auto-merge. The AI only *classifies* the changelog; it never merges. The
 workflow's CI gate (gated_merge.sh) still requires the PR's own checks to pass
 before the merge lands, so a bump that breaks CI never merges regardless of this
 verdict.
@@ -35,9 +35,9 @@ TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("MODEL_TOKEN")
 SYSTEM_PROMPT = (
     "You classify whether a MAJOR version bump of a software dependency is safe "
     "to auto-merge for a typical consumer that uses it in a standard, documented "
-    "way. The dependency may be a library/package (e.g. pip), a container base "
-    "image (e.g. docker), or a pinned CI action (e.g. github-actions); judge it "
-    "according to its ecosystem. "
+    "way. The dependency may be a library/package (e.g. a Python package managed "
+    "by uv or pip), a container base image (e.g. docker), or a pinned CI action "
+    "(e.g. github-actions); judge it according to its ecosystem. "
     "Return verdict='auto' ONLY when the changelog shows NO breaking change that "
     "could affect such a consumer: e.g. internal refactors, transitive dependency "
     "bumps, runtime/engine upgrades, new OPTIONAL features or inputs, or bug fixes. "

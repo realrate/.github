@@ -8,9 +8,11 @@ name: Dependabot Auto-Merge
 # pull_request / merge_queue); it must NOT be a reusable (workflow_call) workflow.
 #
 # Patch/minor bumps are approved and CI-gate-merged. EVERY major bump (any
-# ecosystem -- github-actions, pip, docker -- in every repo) gets an AI risk
+# ecosystem -- github-actions, uv/pip, docker -- in every repo) gets an AI risk
 # verdict (GitHub Models) and is auto-merged if judged low-risk/non-breaking,
-# else commented + labeled `needs-manual-review` for a human.
+# else commented + labeled `needs-manual-review` for a human. The ecosystem is a
+# hint to the classifier, not a gate, so it adapts to whatever fetch-metadata
+# reports (this repo uses `uv` for Python, not `pip`).
 #
 # Every auto-merge (patch/minor AND AI-approved majors) goes through
 # review-tooling/gated_merge.sh, which waits for the PR's own CI checks to finish
