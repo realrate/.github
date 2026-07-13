@@ -8,9 +8,10 @@ name: Dependabot Auto-Merge
 # pull_request / merge_queue); it must NOT be a reusable (workflow_call) workflow.
 #
 # For patch/minor bumps it approves the PR; for major bumps it comments and
-# labels `needs-manual-review` for a human -- EXCEPT for repos on
-# AIGATE_ALLOWLIST, where major `github-actions` bumps get an AI risk verdict
-# (GitHub Models) and are eligible for auto-merge if judged low-risk/non-breaking.
+# labels `needs-manual-review` for a human -- EXCEPT major `github-actions`
+# bumps, which in EVERY repo get an AI risk verdict (GitHub Models) and are
+# eligible for auto-merge if judged low-risk/non-breaking. Major pip/docker bumps
+# stay human.
 #
 # Every auto-merge (patch/minor AND AI-approved majors) goes through
 # review-tooling/gated_merge.sh, which waits for the PR's own CI checks to finish
@@ -42,11 +43,10 @@ jobs:
   auto-merge:
     runs-on: ubuntu-latest
     env:
-      # AI-gated auto-merge of MAJOR github-actions bumps (RealRate-Private#2229).
-      # Repos listed here opt in; all others keep comment + needs-manual-review.
+      # AI-gated auto-merge of MAJOR github-actions bumps, in every repo the
+      # shared workflow is injected into (RealRate-Private#2229).
       # AIGATE_DRY_RUN=true posts the AI verdict as a comment but does NOT merge;
       # =false enforces (verdict=auto -> approve + gated auto-merge).
-      AIGATE_ALLOWLIST: '["realrate/RealRate-Private"]'
       AIGATE_DRY_RUN: "false"
       # CI gate (RealRate-Private#2244): when "true", auto-merges wait for the
       # PR's checks to pass before merging. Set "false" as a kill switch to fall
@@ -92,9 +92,9 @@ jobs:
           CI_GATE_ENABLED: ${{ env.CI_GATE_ENABLED }}
           MERGE_METHOD: rebase
 
-      # The generic major-bump comment/label below handle every major bump EXCEPT
-      # the AI-gated case (allowlisted repo + github-actions ecosystem), which is
-      # handled by the AI block further down so we don't double-comment/label.
+      # The generic major-bump comment/label below handle every NON-github-actions
+      # major bump. github-actions majors are handled by the AI block further down
+      # (in every repo), so we don't double-comment/label them here.
       - name: Comment on major bump PR
         # Only comment when the PR is first opened, not on every synchronize,
         # so re-pushes/rebases of the Dependabot branch don't post duplicate
@@ -103,7 +103,7 @@ jobs:
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
           github.event.action == 'opened' &&
-          !(steps.metadata.outputs.package-ecosystem == 'github_actions' && contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository))
+          steps.metadata.outputs.package-ecosystem != 'github_actions'
         run: |
           gh pr comment "$PR_URL" --body "⚠️ **Major version bump detected** — this PR requires manual review before merging. Please check the changelog for breaking changes."
         env:
@@ -113,7 +113,7 @@ jobs:
       - name: Add label to major bump PR
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
-          !(steps.metadata.outputs.package-ecosystem == 'github_actions' && contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository))
+          steps.metadata.outputs.package-ecosystem != 'github_actions'
         # Create the label if the repo doesn't have it, and never fail the job on
         # labelling: this workflow is a required check, so a labelling error must
         # NOT block a human from merging a major bump after manual review.
@@ -126,7 +126,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ---------------------------------------------------------------------------
-      # AI risk gate for MAJOR github-actions bumps (allowlisted repos only).
+      # AI risk gate for MAJOR github-actions bumps (every repo).
       # Runs once, on `opened` (the dependency/version is fixed for the PR's life,
       # so re-evaluating on every synchronize would only add noise). The verdict
       # step is read-only and NEVER merges; a separate deterministic step acts on
@@ -141,8 +141,7 @@ jobs:
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
           steps.metadata.outputs.package-ecosystem == 'github_actions' &&
-          github.event.action == 'opened' &&
-          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository)
+          github.event.action == 'opened'
         env:
           # Inference runs on GitHub Models via the built-in token (`models: read`);
           # no external API key. GITHUB_TOKEN also authenticates the `gh` calls below.
@@ -187,7 +186,6 @@ jobs:
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
           steps.metadata.outputs.package-ecosystem == 'github_actions' &&
           github.event.action == 'opened' &&
-          contains(fromJSON(env.AIGATE_ALLOWLIST), github.repository) &&
           !(steps.aiverdict.outcome == 'success' && steps.aiverdict.outputs.verdict == 'auto' && env.AIGATE_DRY_RUN != 'true')
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
