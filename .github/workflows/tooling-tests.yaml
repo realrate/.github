@@ -1,0 +1,31 @@
+name: Review tooling tests
+
+# Lints and tests the shared Dependabot auto-merge tooling so a change to the CI
+# gate can't silently regress (e.g. realrate/.github#11, where a transient
+# check-read was misread as "no CI"). Runs on PRs and pushes that touch it.
+
+on:
+  pull_request:
+    paths:
+      - ".github/review-tooling/**"
+      - ".github/workflows/tooling-tests.yaml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/review-tooling/**"
+      - ".github/workflows/tooling-tests.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  tooling-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: shellcheck
+        run: shellcheck .github/review-tooling/gated_merge.sh .github/review-tooling/test_gated_merge.sh
+
+      - name: gated_merge regression tests
+        run: bash .github/review-tooling/test_gated_merge.sh
