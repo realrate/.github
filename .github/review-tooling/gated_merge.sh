@@ -48,7 +48,21 @@ if [ "$CI_GATE_ENABLED" != "true" ]; then
   exit $?
 fi
 
+# OWNER/REPO from the PR URL, host-agnostic: strip scheme, then host, then the
+# /pull/N suffix. Used for the REST check-runs/status queries below.
+_repo_tail="${PR_URL#*://}"; _repo_tail="${_repo_tail#*/}"; REPO="${_repo_tail%%/pull/*}"
+
 pr_state() { gh pr view "$PR_URL" --json state --jq .state 2>/dev/null || echo ""; }
+
+# The PR head commit SHA (fixed for a run -- a rebase/synchronize cancels this
+# run and starts a fresh one). Prints it, or returns non-zero if it can't be
+# read so the caller retries rather than treating the blip as "no checks".
+resolve_head_sha() {
+  local sha
+  sha="$(gh pr view "$PR_URL" --json headRefOid --jq .headRefOid 2>/dev/null)" || return 1
+  [ -n "$sha" ] || return 1
+  printf '%s' "$sha"
+}
 
 route_to_human() {
   gh pr comment "$PR_URL" --body "🤖 **Auto-merge held:** $1 Routed to manual review." || true
@@ -78,16 +92,44 @@ do_merge() {
   route_to_human "the merge was rejected: $(printf '%s' "$err" | tail -1)"
 }
 
-# The PR's checks minus THIS workflow's own run, matched by run id inside the
-# check link (rename-proof). Captures stdout even when `gh pr checks` exits
-# non-zero (it does when checks are pending/failing); only an empty result -- no
-# checks reported yet -- collapses to [].
+# The PR head SHA's checks minus THIS workflow's own run, as a JSON array of
+# {name,bucket,link}. Read from the REST check-runs + commit-status APIs rather
+# than `gh pr checks` (the GraphQL status rollup): under a simultaneous multi-PR
+# Dependabot batch the rollup can transiently return nothing, and the old code
+# mapped that empty stdout to "no checks" -- so a green check the REST API still
+# reported was misread as "no CI", parking healthy patch/minor bumps for a human
+# (realrate/.github#11). The REST endpoints return a well-formed body with a
+# reliable count even while checks are pending, and a real non-zero exit on a
+# genuine API error.
+#
+# Crucially this DISTINGUISHES an API failure from a genuine empty result: on any
+# failed read it prints the sentinel "__ERR__" so callers retry instead of
+# concluding "no checks". Self-exclusion matches this run's id in the check-run
+# URL (`/runs/<run_id>/`), rename-proof. Commit statuses carry no run id, but our
+# own workflow reports a check-run (not a status), so it never appears there.
 other_checks() {
-  local out
-  out="$(gh pr checks "$PR_URL" --json name,bucket,link 2>/dev/null)"
-  [ -z "$out" ] && { echo '[]'; return; }
-  echo "$out" | jq --arg rid "${GITHUB_RUN_ID:-0}" \
-    '[.[] | select((.link // "") | contains("/runs/" + $rid + "/") | not)]'
+  local sha runs statuses rid="${GITHUB_RUN_ID:-0}"
+  sha="$(resolve_head_sha)" || { printf '__ERR__'; return; }
+  runs="$(gh api "repos/$REPO/commits/$sha/check-runs?per_page=100" 2>/dev/null)" || { printf '__ERR__'; return; }
+  statuses="$(gh api "repos/$REPO/commits/$sha/status" 2>/dev/null)" || { printf '__ERR__'; return; }
+  jq -n --argjson runs "$runs" --argjson st "$statuses" --arg rid "$rid" '
+    [ $runs.check_runs[]?
+      | select(((.html_url // .details_url) // "") | contains("/runs/" + $rid + "/") | not)
+      | { name: .name,
+          link: (.html_url // .details_url // ""),
+          bucket: (if .status != "completed" then "pending"
+                   elif (.conclusion == "success" or .conclusion == "neutral") then "pass"
+                   elif .conclusion == "skipped" then "skip"
+                   elif .conclusion == "cancelled" then "cancel"
+                   else "fail" end) } ]
+    +
+    [ $st.statuses[]?
+      | { name: .context,
+          link: (.target_url // ""),
+          bucket: (if .state == "pending" then "pending"
+                   elif .state == "success" then "pass"
+                   else "fail" end) } ]
+  ' 2>/dev/null || printf '__ERR__'
 }
 
 start="$SECONDS"
@@ -97,8 +139,17 @@ start="$SECONDS"
 #    would skip the gate exactly when checks are merely delayed (and an immediate
 #    merge before the base-branch policy's requirements exist gets rejected
 #    anyway). If nothing registers, route to a human rather than merge blind.
+#    A __ERR__ read (transient API failure) is NOT "no checks": keep waiting so a
+#    blip during a busy batch can't be mistaken for a CI-less repo (see #11).
 while :; do
   checks="$(other_checks)"
+  if [ "$checks" = "__ERR__" ]; then
+    if [ $((SECONDS - start)) -ge "$TIMEOUT" ]; then
+      route_to_human "could not read CI status from the API within $((TIMEOUT / 60)) minutes."
+      exit 0
+    fi
+    sleep "$POLL"; continue
+  fi
   [ "$(echo "$checks" | jq 'length')" -gt 0 ] && break
   if [ $((SECONDS - start)) -ge "$APPEAR" ]; then
     route_to_human "no CI checks registered within ${APPEAR}s (checks delayed, or the repo has none) -- not auto-merging without a green signal."
@@ -110,6 +161,14 @@ done
 # 2) Wait for every non-self check to reach a terminal state.
 while :; do
   checks="$(other_checks)"
+  if [ "$checks" = "__ERR__" ]; then
+    if [ "$(pr_state)" != "OPEN" ]; then echo "PR no longer open; nothing to do."; exit 0; fi
+    if [ $((SECONDS - start)) -ge "$TIMEOUT" ]; then
+      route_to_human "could not read CI status from the API within $((TIMEOUT / 60)) minutes."
+      exit 0
+    fi
+    sleep "$POLL"; continue
+  fi
   [ "$(echo "$checks" | jq '[.[] | select(.bucket=="pending")] | length')" -eq 0 ] && break
   if [ "$(pr_state)" != "OPEN" ]; then echo "PR no longer open; nothing to do."; exit 0; fi
   if [ $((SECONDS - start)) -ge "$TIMEOUT" ]; then
