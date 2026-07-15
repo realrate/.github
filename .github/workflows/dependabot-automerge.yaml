@@ -39,6 +39,14 @@ permissions:
   pull-requests: write
   issues: write
   models: read # GitHub Models inference for the major-bump AI risk gate
+  # gated_merge.sh reads the CI gate authoritatively from the REST Checks API
+  # (commits/{sha}/check-runs) plus legacy commit statuses (commits/{sha}/status).
+  # On a private repo a token without these read scopes gets 403 -- which the
+  # gate treats as an unreadable-checks error and, failing safe, never merges.
+  # With a `permissions:` block present, any scope not listed defaults to `none`,
+  # so both must be granted explicitly (realrate/.github#11).
+  checks: read
+  statuses: read
 
 jobs:
   auto-merge:
