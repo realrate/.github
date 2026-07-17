@@ -127,9 +127,14 @@ jobs:
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
           github.event.action == 'opened'
         env:
-          # Inference runs on GitHub Models via the built-in token (`models: read`);
-          # no external API key. GITHUB_TOKEN also authenticates the `gh` calls below.
+          # Authenticates the `gh` calls below, and is the inference fallback.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Inference token, preferred over GITHUB_TOKEN by the script. The org's
+          # built-in token can read the Models catalogue but 403s every inference
+          # call (realrate/.github#14), so a PAT whose account has Models access
+          # does the inference. Unset -> script falls back to GITHUB_TOKEN -> 403
+          # -> verdict=human, i.e. exactly today's safe behaviour, never a merge.
+          MODEL_TOKEN: ${{ secrets.MODELS_PAT }}
           # gpt-4.1 is the strongest model actually available for GitHub Models
           # inference (gpt-5* are cataloged but return `unavailable_model`).
           MODEL_ID: openai/gpt-4.1
