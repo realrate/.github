@@ -18,7 +18,7 @@ verdict.
 
 Inference runs on **GitHub Models** (https://models.github.ai/inference). The
 OpenAI SDK is only the client library; it targets the GitHub Models endpoint, not
-OpenAI. Model defaults to `openai/gpt-5` (override via MODEL_ID).
+OpenAI. Model defaults to `openai/gpt-4.1` (override via MODEL_ID).
 
 Auth: MODEL_TOKEN if set, else the workflow's built-in GITHUB_TOKEN (`models:
 read`). The built-in token only works where the org is entitled to Models
@@ -40,7 +40,10 @@ import os
 import re
 import sys
 
-MODEL = os.getenv("MODEL_ID", "openai/gpt-5")
+# gpt-4.1 is the strongest model that actually works here: the gpt-5 entries are
+# reasoning-tier and reject this script's `max_tokens` (BadRequestError), so the
+# old gpt-5 default failed for anyone not overriding MODEL_ID.
+MODEL = os.getenv("MODEL_ID", "openai/gpt-4.1")
 # GitHub Models inference endpoint (OpenAI-compatible). Override for tests.
 BASE_URL = os.getenv("MODEL_ENDPOINT", "https://models.github.ai/inference")
 # Inference token. MODEL_TOKEN wins on purpose: GITHUB_TOKEN is always set in
