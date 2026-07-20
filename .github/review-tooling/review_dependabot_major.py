@@ -16,10 +16,16 @@ workflow's CI gate (gated_merge.sh) still requires the PR's own checks to pass
 before the merge lands, so a bump that breaks CI never merges regardless of this
 verdict.
 
-Inference runs on **GitHub Models** (https://models.github.ai/inference) using the
-workflow's built-in GITHUB_TOKEN + `models: read` permission -- no external API
-key. The OpenAI SDK is only the client library; it targets the GitHub Models
-endpoint, not OpenAI. Model defaults to `openai/gpt-5` (override via MODEL_ID).
+Inference runs on **GitHub Models** (https://models.github.ai/inference). The
+OpenAI SDK is only the client library; it targets the GitHub Models endpoint, not
+OpenAI. Model defaults to `openai/gpt-4.1` (override via MODEL_ID).
+
+Auth: MODEL_TOKEN if set, else the workflow's built-in GITHUB_TOKEN (`models:
+read`). The built-in token only works where the org is entitled to Models
+inference. The realrate org is not: its Actions token reads the model catalogue
+(HTTP 200) but every inference call returns a bare 403 with an empty body,
+regardless of model or tier. Hence MODEL_TOKEN, a PAT whose account does have
+inference. Background and evidence: realrate/.github#14.
 
 Contract: ALWAYS writes a valid verdict JSON and exits 0. On any error
 (missing token, API failure, unparseable response) it emits verdict="human" so the
@@ -34,11 +40,18 @@ import os
 import re
 import sys
 
-MODEL = os.getenv("MODEL_ID", "openai/gpt-5")
+# gpt-4.1 is the strongest model that actually works here: the gpt-5 entries are
+# reasoning-tier and reject this script's `max_tokens` (BadRequestError), so the
+# old gpt-5 default failed for anyone not overriding MODEL_ID.
+MODEL = os.getenv("MODEL_ID", "openai/gpt-4.1")
 # GitHub Models inference endpoint (OpenAI-compatible). Override for tests.
 BASE_URL = os.getenv("MODEL_ENDPOINT", "https://models.github.ai/inference")
-# The built-in Actions token authenticates GitHub Models (needs `models: read`).
-TOKEN = os.getenv("GITHUB_TOKEN") or os.getenv("MODEL_TOKEN")
+# Inference token. MODEL_TOKEN wins on purpose: GITHUB_TOKEN is always set in
+# Actions, so checking it first would silently ignore an explicitly supplied PAT.
+# The built-in token only reaches Models where the org is entitled to inference
+# (realrate is not -- it reads the catalogue but 403s every inference call, see
+# realrate/.github#14), so MODEL_TOKEN is the working path there.
+TOKEN = os.getenv("MODEL_TOKEN") or os.getenv("GITHUB_TOKEN")
 
 SYSTEM_PROMPT = (
     "You classify whether a MAJOR version bump of a software dependency is safe "
@@ -87,6 +100,24 @@ def _fallback(reason):
     return {"verdict": "human", "risk": "unknown", "reason": reason}
 
 
+def _explain(exc):
+    """Turn an SDK exception into something a maintainer can act on.
+
+    GitHub Models answers a token without inference entitlement with a bare 403
+    and an empty body, so the exception name alone ("PermissionDeniedError") sent
+    people hunting through workflow permissions for hours. Name the likely cause.
+    """
+    name = type(exc).__name__
+    if getattr(exc, "status_code", None) == 403 or "PermissionDenied" in name:
+        source = "MODEL_TOKEN" if os.getenv("MODEL_TOKEN") else "GITHUB_TOKEN"
+        return (
+            f"403 from GitHub Models via {source} -- the account behind that token "
+            "has no inference entitlement (catalogue reads succeed, inference is "
+            "refused). Not a workflow-permission problem. See realrate/.github#14"
+        )
+    return name
+
+
 def _extract_json(text):
     """Parse a JSON object from a model response, tolerating ```json fences/prose."""
     text = (text or "").strip()
@@ -116,7 +147,7 @@ def _call_model(client, user, structured):
 def get_verdict(dep_names, title, body, ecosystem=""):
     """Ask GitHub Models for a validated verdict dict. Never raises."""
     if not TOKEN:
-        return _fallback("GITHUB_TOKEN not set (need `models: read`); manual review.")
+        return _fallback("no inference token (MODEL_TOKEN/GITHUB_TOKEN); manual review.")
     try:
         from openai import OpenAI
     except Exception as exc:  # noqa: BLE001 - import guard
@@ -142,7 +173,7 @@ def get_verdict(dep_names, title, body, ecosystem=""):
             if data:
                 break
         except Exception as exc:  # noqa: BLE001 - any API/parse failure
-            last = type(exc).__name__
+            last = _explain(exc)
     if not data:
         return _fallback(f"AI verdict unavailable ({locals().get('last', 'no JSON')}); manual review.")
 

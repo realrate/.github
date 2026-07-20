@@ -1,0 +1,188 @@
+name: models-selftest
+
+# Proves the AI risk gate's inference path actually works, on demand, without
+# waiting for a real major Dependabot bump to come along.
+#
+#   gh workflow run models-selftest.yaml --repo realrate/.github
+#   (or: Actions -> models-selftest -> Run workflow)
+#
+# Use it to answer "did the MODELS_PAT secret fix the 403?" (realrate/.github#14)
+# and, on every change to the gate's script, to catch a regression early.
+#
+# Deliberately the INVERSE of the gate's error posture. The gate fails SAFE: any
+# error becomes verdict=human, because a broken AI must never merge anything.
+# That is also why a broken AI stayed invisible for weeks. This job fails LOUD,
+# so breakage shows up as a red run instead of silently routing every major bump
+# to a human forever.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        description: "Model to test (must exist in the GitHub Models catalogue)"
+        default: openai/gpt-4.1
+        type: string
+  # Regression cover: re-run whenever the gate's inference path or this test changes.
+  pull_request:
+    paths:
+      - .github/review-tooling/review_dependabot_major.py
+      - .github/workflows/models-selftest.yaml
+
+permissions:
+  contents: read
+  models: read # lets the built-in token reach GitHub Models, for the comparison probe
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    env:
+      MODEL_ID: ${{ inputs.model_id || 'openai/gpt-4.1' }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      # Absent secret must not paint PRs red -- it is the expected state until an
+      # admin adds it. Report and stop cleanly instead.
+      - name: Check whether MODELS_PAT is configured
+        id: cfg
+        env:
+          # MODELS_PAT_TEST lets a new token be trialled without touching the
+          # production MODELS_PAT secret; falls back to MODELS_PAT when unset.
+          MODELS_PAT: ${{ secrets.MODELS_PAT_TEST || secrets.MODELS_PAT }}
+        run: |
+          if [ -z "$MODELS_PAT" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### models-selftest: skipped"
+              echo
+              echo "\`MODELS_PAT\` is not configured, so there is nothing to test yet."
+              echo "The gate falls back to the built-in token, gets a 403, and routes"
+              echo "every major bump to a human -- today's expected behaviour."
+              echo
+              echo "To enable: add an **org** secret \`MODELS_PAT\` (fine-grained PAT,"
+              echo "\`Models: read\` only, visibility **all repositories**), then re-run"
+              echo "this workflow. See realrate/.github#14."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::MODELS_PAT not configured -- skipping (this is not a failure)"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Side-by-side proof of which credential can actually do inference. This is
+      # the exact comparison that took a full session to establish by hand.
+      - name: Probe inference with each credential
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          BUILTIN: ${{ secrets.GITHUB_TOKEN }}
+          PAT: ${{ secrets.MODELS_PAT_TEST || secrets.MODELS_PAT }}
+        run: |
+          probe() { # $1=label $2=token
+            code=$(curl -s -o /tmp/b.json -w '%{http_code}' \
+              https://models.github.ai/inference/chat/completions \
+              -H "Authorization: Bearer $2" -H "Content-Type: application/json" \
+              -d "{\"model\":\"$MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}],\"max_tokens\":5}")
+            echo "$code"
+          }
+          builtin_code=$(probe "GITHUB_TOKEN" "$BUILTIN")
+          pat_code=$(probe "MODELS_PAT" "$PAT")
+          echo "GITHUB_TOKEN -> $builtin_code | MODELS_PAT -> $pat_code"
+          {
+            echo "### models-selftest"
+            echo
+            echo "Model: \`$MODEL_ID\`"
+            echo
+            echo "| credential | inference |"
+            echo "|---|---|"
+            echo "| built-in \`GITHUB_TOKEN\` | $builtin_code |"
+            echo "| \`MODELS_PAT\` | $pat_code |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$pat_code" != "200" ]; then
+            echo "::error::MODELS_PAT cannot run inference (HTTP $pat_code). The PAT needs 'Models: read' and its account needs Models access."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ **MODELS_PAT failed inference (HTTP $pat_code)** -- the gate cannot produce verdicts." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [ "$builtin_code" = "200" ]; then
+            echo "::notice::The built-in token now works too -- org entitlement looks fixed, so MODELS_PAT may no longer be needed (see realrate/.github#14)."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "ℹ️ The built-in token also returned 200. If that holds, the org is entitled to inference and \`MODELS_PAT\` can be retired." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up uv
+        if: steps.cfg.outputs.configured == 'true'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      # End-to-end through the REAL script, on fixtures with known-correct answers.
+      - name: Run the real verdict script on fixture bumps
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          MODEL_TOKEN: ${{ secrets.MODELS_PAT_TEST || secrets.MODELS_PAT }}
+        run: |
+          fail=0
+          {
+            echo ""
+            echo "| fixture | expected | verdict | risk | reason |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for spec in "breaking:human:numpy:pip" "safe:auto:example/some-action:github_actions"; do
+            name="${spec%%:*}"; rest="${spec#*:}"
+            expect="${rest%%:*}"; rest="${rest#*:}"
+            deps="${rest%%:*}"; eco="${rest#*:}"
+            dir=".github/review-tooling/selftest-fixtures/$name"
+
+            # Run inline, NOT in a subshell: a failure must be able to fail this job.
+            uv run --script .github/review-tooling/review_dependabot_major.py \
+              --title-file "$dir/title.txt" --body-file "$dir/body.md" \
+              --dep-names "$deps" --ecosystem "$eco" --out "$dir/verdict.json" || true
+
+            if [ ! -s "$dir/verdict.json" ]; then
+              echo "::error::$name: the script produced no verdict file at all"
+              echo "| $name | $expect | ❌ none | - | script produced no verdict |" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+              continue
+            fi
+
+            verdict=$(jq -r '.verdict // ""' "$dir/verdict.json")
+            risk=$(jq -r '.risk // ""' "$dir/verdict.json")
+            reason=$(jq -r '.reason // ""' "$dir/verdict.json")
+
+            # HARD requirement: a well-formed verdict is what proves inference ran.
+            # The script fails safe, so it emits verdict=human on an API error too --
+            # hence checking the reason for our own fallback wording, otherwise a
+            # total outage would masquerade as a correct "human" verdict here.
+            case "$verdict" in
+              auto|human) ;;
+              *) echo "::error::$name: invalid verdict '$verdict'"; fail=1; continue ;;
+            esac
+            # _fallback() is the only thing that emits risk="unknown" AND a reason
+            # ending "manual review." Matching both keeps a genuine model verdict
+            # that happens to mention manual review from tripping this.
+            if [ "$risk" = "unknown" ] && [ "${reason%manual review.}" != "$reason" ]; then
+              echo "::error::$name: verdict came from the error fallback, not the model: $reason"
+              echo "| $name | $expect | ❌ fallback | $risk | ${reason:0:130} |" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+              continue
+            fi
+
+            # SOFT check: the model is non-deterministic, so a differing judgement is
+            # reported, not fatal. Only a malformed/fallback verdict fails this job.
+            mark="✅"
+            if [ "$verdict" != "$expect" ]; then
+              mark="⚠️"
+              echo "::warning::$name: expected verdict=$expect but got $verdict -- judgement drift, not an outage. Reason: $reason"
+            fi
+            echo "| $name | $expect | $mark $verdict | $risk | ${reason:0:130} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$name -> verdict=$verdict risk=$risk"
+          done
+
+          if [ "$fail" != "0" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ **The gate could not produce a valid verdict.**" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo ""
+            echo "✅ **Inference works and the gate produces valid verdicts.**"
+            echo "Major bumps will now get an AI verdict (still gated on green CI)."
+          } >> "$GITHUB_STEP_SUMMARY"
