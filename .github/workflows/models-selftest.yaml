@@ -45,7 +45,9 @@ jobs:
       - name: Check whether MODELS_PAT is configured
         id: cfg
         env:
-          MODELS_PAT: ${{ secrets.MODELS_PAT }}
+          # MODELS_PAT_TEST lets a new token be trialled without touching the
+          # production MODELS_PAT secret; falls back to MODELS_PAT when unset.
+          MODELS_PAT: ${{ secrets.MODELS_PAT_TEST || secrets.MODELS_PAT }}
         run: |
           if [ -z "$MODELS_PAT" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
@@ -71,7 +73,7 @@ jobs:
         if: steps.cfg.outputs.configured == 'true'
         env:
           BUILTIN: ${{ secrets.GITHUB_TOKEN }}
-          PAT: ${{ secrets.MODELS_PAT }}
+          PAT: ${{ secrets.MODELS_PAT_TEST || secrets.MODELS_PAT }}
         run: |
           probe() { # $1=label $2=token
             code=$(curl -s -o /tmp/b.json -w '%{http_code}' \
@@ -114,7 +116,7 @@ jobs:
       - name: Run the real verdict script on fixture bumps
         if: steps.cfg.outputs.configured == 'true'
         env:
-          MODEL_TOKEN: ${{ secrets.MODELS_PAT }}
+          MODEL_TOKEN: ${{ secrets.MODELS_PAT_TEST || secrets.MODELS_PAT }}
         run: |
           fail=0
           {
