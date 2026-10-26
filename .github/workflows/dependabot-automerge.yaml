@@ -195,3 +195,30 @@ jobs:
           gh label create needs-manual-review --color FBCA04 \
             --description "Dependabot major bump — needs manual review before merge" 2>/dev/null || true
           gh pr edit "$PR_URL" --add-label "needs-manual-review" || true
+
+      # -------------------------------------------------------------------------
+      # Deploy hand-off (Claude, 26 Oct 2026; Holger's security process §8.8).
+      # A merge performed with GITHUB_TOKEN does NOT trigger `push` workflows
+      # (GitHub rule against recursive runs) -- so auto-merged updates never
+      # reached production (RealRateDynamic prod stayed on 1 Sep code for weeks).
+      # repository_dispatch is exempt from that rule: after a successful merge
+      # into the repo's DEFAULT branch we emit `dependabot-merged`; deploy
+      # workflows listen to it (`on: repository_dispatch: types: [dependabot-merged]`).
+      # Repos without such a listener simply ignore the event.
+      # -------------------------------------------------------------------------
+      - name: Signal merge to deploy workflows (repository_dispatch)
+        if: always()
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          state=$(gh pr view "$PR_URL" --json state --jq .state || echo UNKNOWN)
+          default=$(gh api "repos/$REPO" --jq .default_branch || echo "")
+          if [ "$state" = "MERGED" ] && [ "$BASE" = "$default" ]; then
+            gh api "repos/$REPO/dispatches" -f event_type=dependabot-merged -f "client_payload[pr]=$PR_URL"
+            echo "dispatched dependabot-merged for $PR_URL"
+          else
+            echo "no dispatch (state=$state, base=$BASE, default=$default)"
+          fi
