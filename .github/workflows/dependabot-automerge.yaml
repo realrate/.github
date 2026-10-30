@@ -60,6 +60,13 @@ jobs:
       # CI passes is auto-merged; AI-flagged risk or a failed check routes to a
       # human. patch/minor auto-merge + the CI gate are unaffected by this flag.
       AIGATE_DRY_RUN: "false"
+      # AI gate kill switch (30 Oct 2026): GitHub Models was retired on 30 Jul 2026 --
+      # models.github.ai/inference now answers every request with "200 text/plain OK", so the
+      # verdict step raised AttributeError and every major bump fell through to manual review
+      # with a misleading "AI verdict unavailable" comment. External AI APIs are ruled out
+      # (owner decision), so majors are now reviewed by the owner's Claude session in the
+      # daily security run (shared security concept, stage 2). "true" re-enables the old gate.
+      AIGATE_ENABLED: "false"
       # CI gate (RealRate-Private#2244): when "true", auto-merges wait for the
       # PR's checks to pass before merging. Set "false" as a kill switch to fall
       # back to GitHub-native `--auto` (waits only for *required* checks).
@@ -116,6 +123,7 @@ jobs:
       # ---------------------------------------------------------------------------
       - name: Set up uv (runs the AI verdict script)
         if: |
+          env.AIGATE_ENABLED == 'true' &&
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
           github.event.action == 'opened'
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -124,6 +132,7 @@ jobs:
         id: aiverdict
         continue-on-error: true # a failed verdict must fall through to manual review, not fail the required check
         if: |
+          env.AIGATE_ENABLED == 'true' &&
           steps.metadata.outputs.update-type == 'version-update:semver-major' &&
           github.event.action == 'opened'
         env:
@@ -183,8 +192,11 @@ jobs:
           VERDICT: ${{ steps.aiverdict.outputs.verdict }}
           REASON: ${{ steps.aiverdict.outputs.reason }}
           DRY_RUN: ${{ env.AIGATE_DRY_RUN }}
+          AIGATE_ENABLED: ${{ env.AIGATE_ENABLED }}
         run: |
-          if [ -z "$VERDICT" ]; then
+          if [ "$AIGATE_ENABLED" != "true" ]; then
+            body="🔍 **Major update — manual review.** The CI AI gate is switched off (GitHub Models was retired on 30 Jul 2026). The owner's Claude session reviews this PR in the daily security run and posts a recommendation; merge after the owner's OK."
+          elif [ -z "$VERDICT" ]; then
             body="🤖 **AI risk gate: unavailable** — routed to manual review."
           elif [ "$DRY_RUN" = "true" ] && [ "$VERDICT" = "auto" ]; then
             body="🤖 **AI risk gate: auto** _(dry-run — auto-merge disabled; observing)._ ${REASON} Left for manual review."
